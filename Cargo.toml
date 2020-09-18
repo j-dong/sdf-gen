@@ -1,0 +1,17 @@
+[package]
+name = "render_svg"
+version = "0.1.0"
+authors = ["James Dong <jamesdong@utexas.edu>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+image = "0.23"
+structopt = "0.3"
+xml-rs = "0.8.3"
+svgtypes = "0.5.0"
+renderdoc = "0.9.1"
+ash = "0.31.0"
+vk-mem = "0.2.2"
+ordered-float = "2.0.0"

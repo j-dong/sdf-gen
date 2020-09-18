@@ -1,0 +1,246 @@
+#version 450
+
+layout(local_size_x=8, local_size_y=8, local_size_z=16) in;
+
+struct Curve {
+    vec4 from_to;
+    vec4 control;
+};
+layout(std140, set=0, binding=0) buffer Curves {
+    Curve curves[];
+};
+layout(set=0, binding=1, rgba8) uniform readonly image2D tex_inside;
+layout(set=0, binding=2, rgba8) uniform image2D tex_out;
+
+shared vec4 local_data[gl_WorkGroupSize.x * gl_WorkGroupSize.y * gl_WorkGroupSize.z]; // used for reduce
+
+layout(push_constant) uniform PushConstants {
+    uint start_index;
+} U;
+
+float cbrt(float x) {
+    float x_sign = sign(x);
+    x = abs(x);
+    float guess = pow(x, 1.0 / 3.0);
+    x = (2.0 * guess + x / (guess * guess)) / 3.0;
+    return x_sign * x;
+}
+
+void solveCubic(float a, float b, float c, float d, out vec3 solns, out bvec3 valid) {
+    // solves a x^3 + b x^2 + c x + d = 0
+    solns = vec3(0.0);
+    valid = bvec3(false, false, false);
+    if (abs(a) < 1e-6) {
+        if (abs(b) < 1e-6) {
+            if (abs(c) < 1e-6) {
+                // degenerate case
+                solns[0] = 0.0;
+                valid[0] = abs(d) < 1e-6;
+                return;
+            }
+            // linear case
+            solns[0] = -d / c;
+            valid[0] = true;
+            return;
+        }
+        // quadratic case
+        // x = -c +- sqrt(c^2 - 4 b d) / 2 b
+        float disc = c * c - 4 * b * d;
+        float s = sqrt(max(0.0, disc));
+        solns[0] = 0.5 * (-c + s) / b;
+        solns[1] = 0.5 * (-c - s) / b;
+        valid[0] = disc > -1e-6;
+        valid[1] = disc > -1e-6;
+        return;
+    }
+    // cubic case
+    // depress to form - x^3 + 3 p x + 2 q = 0
+    float p = -(3.0 * a * c - b * b) / (9.0 * a * a);
+    float q = -(2.0 * b * b * b - 9.0 * a * b * c + 27.0 * a * a * d) / (54.0 * a * a * a);
+    float off = -b / (3.0 * a);
+    if (abs(q) < 1e-6) {
+        // -x^3 + 3 p x = 0
+        // x (-x^2 + 3 p) = 0
+        // x = 0, or
+        // x = +-sqrt(3 p)
+        float s = sqrt(max(0.0, 3.0 * p));
+        solns[0] = off;
+        valid[0] = true;
+        solns[1] = off + s;
+        solns[2] = off - s;
+        valid[1] = p > -1e-6;
+        valid[2] = p > -1e-6;
+    } else {
+        float w = -q * q;
+        precise float e = fma(-q, q, -w);
+        float s = p * p;
+        precise float t = fma(p, p, -s);
+        precise float f = fma(s, p, w);
+        precise float u = t * p;
+        precise float v = fma(t, p, -u);
+        precise float A = u + f;
+        precise float B = A - u;
+        precise float C = A - B;
+        B = f - B;
+        C = u - C;
+        precise float p3mq2 = (((e + A) + B) + C) + v;
+        if (p3mq2 < -1e-6) {
+            // one real root
+            if (p > 0) {
+                solns[0] = off + 2.0 * sign(q) * sqrt(p) *
+                    cosh(acosh(abs(q)/p * sqrt(1.0 / p)) / 3.0);
+                valid[0] = true;
+            } else if (p < 0) {
+                solns[0] = off - 2.0 * sqrt(-p) *
+                    sinh(asinh(q / p * sqrt(-1.0 / p)) / 3.0);
+                valid[0] = true;
+            } else {
+                // -x^3 + 2 q = 0
+                // x = cbrt(2 q)
+                solns[0] = off + cbrt(2.0 * q);
+                valid[0] = true;
+            }
+        } else {
+            // three real roots
+            // float theta = atan(sqrt(max(0.0, p3mq2)) / q) / 3.0;
+            float theta = atan(sqrt(max(0.0, p3mq2)), q) / 3.0;
+            float sp = sqrt(max(0.0, p));
+            float pi = 3.1415926535897932384626433832795;
+            solns[0] = off + 2.0 * sp * cos(theta);
+            solns[1] = off + 2.0 * sp * cos(theta + 2.0 * pi / 3.0);
+            solns[2] = off + 2.0 * sp * cos(theta + 4.0 * pi / 3.0);
+            valid[0] = true;
+            valid[1] = true;
+            valid[2] = true;
+        }
+    }
+}
+
+void newtonIterate(float a, float b, float c, float d, inout vec3 solns) {
+    vec3 ys = a * solns * solns * solns + b * solns * solns + c * solns + d;
+    vec3 dys = 3.0 * a * solns * solns + 2.0 * b * solns + c;
+    solns -= ys / dys;
+}
+
+const mat3 BEZIER = mat3(1.0, 0.0, 0.0, -2.0, 2.0, 0.0, 1.0, -2.0, 1.0);
+
+vec2 eval_bezier(vec2 from, vec2 control, vec2 to, float t) {
+    return mat3x2(from, control, to) * BEZIER * vec3(1.0, t, t * t);
+}
+
+void reduce_into(inout vec4 a, vec4 b) {
+    if (abs(b.w) < a.w) {
+        a = b;
+    }
+}
+
+void main() {
+    uint i = gl_LocalInvocationID.z + U.start_index;
+    // B(t) = (1 - t)^2 from + 2 t (1 - t) control + t^2 to
+    //      = from - 2 t from + t^2 from + 2 t control - 2 t^2 control + t^2 to
+    //      = from + (-2 from + 2 control) t + (from - 2 control + to) t^2
+    // let a = from - P; b = -2 from + 2 control; c = from - 2 control + to
+    // ||B(t) - P||^2 = ||a||^2 + 2 a . b t + (2 a . c + ||b||^2) t^2 + 2 b . c t^3 + ||c||^2 t^4
+    // d ||B(t) - P||^2 = 2 a . b + 2 (2 a . c + ||b||^2) t + 6 b . c t^2 + 4 ||c||^2 t^3
+    vec2 P = vec2(gl_GlobalInvocationID.xy) + 0.5;
+    vec2 from = curves[i].from_to.xy;
+    vec2 to = curves[i].from_to.zw;
+    vec2 control = curves[i].control.xy;
+    bool curve_valid = curves[i].control.w > 0.5;
+    bool is_inside = imageLoad(tex_inside, ivec2(gl_GlobalInvocationID.xy)).r > 0.5;
+    vec2 va = from - P;
+    vec2 vb = -2.0 * from + 2.0 * control;
+    vec2 vc = from - 2.0 * control + to;
+    float ca = 4.0 * dot(vc, vc);
+    float cb = 6.0 * dot(vb, vc);
+    float cc = 2.0 * (2.0 * dot(va, vc) + dot(vb, vb));
+    float cd = 2.0 * dot(va, vb);
+    vec3 solns;
+    bvec3 valid;
+    solveCubic(ca, cb, cc, cd, solns, valid);
+    newtonIterate(ca, cb, cc, cd, solns);
+    newtonIterate(ca, cb, cc, cd, solns);
+    newtonIterate(ca, cb, cc, cd, solns);
+
+    vec2 curve_pos = eval_bezier(from, control, to, 0.0);
+    float min_dist2 = dot(curve_pos - P, curve_pos - P);
+    float best = 0.0;
+    vec2 pos_at1 = eval_bezier(from, control, to, 1.0);
+    float dist2_at1 = dot(pos_at1 - P, pos_at1 - P);
+    if (dist2_at1 < min_dist2) {
+        curve_pos = pos_at1;
+        min_dist2 = dist2_at1;
+        best = 1.0;
+    }
+
+    solns = clamp(solns, 0.0, 1.0);
+
+    vec2 pos_0 = eval_bezier(from, control, to, solns[0]);
+    float dist2_0 = dot(pos_0 - P, pos_0 - P);
+    if (dist2_0 < min_dist2 && valid[0]) {
+        curve_pos = pos_0;
+        min_dist2 = dist2_0;
+        best = solns[0];
+    }
+
+    vec2 pos_1 = eval_bezier(from, control, to, solns[1]);
+    float dist2_1 = dot(pos_1 - P, pos_1 - P);
+    if (dist2_1 < min_dist2 && valid[1]) {
+        curve_pos = pos_1;
+        min_dist2 = dist2_1;
+        best = solns[1];
+    }
+
+    vec2 pos_2 = eval_bezier(from, control, to, solns[2]);
+    float dist2_2 = dot(pos_2 - P, pos_2 - P);
+    if (dist2_2 < min_dist2 && valid[2]) {
+        curve_pos = pos_2;
+        min_dist2 = dist2_2;
+        best = solns[2];
+    }
+
+    float min_dist = sqrt(max(0.0, min_dist2));
+
+    if (!curve_valid) {
+        min_dist = uintBitsToFloat(0x7F800000); // infinity
+    }
+
+    vec2 grad = normalize(P - curve_pos);
+    float signed_dist = min_dist;
+    if (is_inside) {
+        grad *= -1.0;
+        signed_dist *= -1.0;
+    }
+
+    // reduce using min_dist
+    uint local_i = gl_LocalInvocationID.z + gl_WorkGroupSize.z * (
+        gl_LocalInvocationID.x + gl_WorkGroupSize.x * (
+            gl_LocalInvocationID.y));
+    uint z = gl_LocalInvocationID.z;
+    local_data[local_i] = vec4(grad, signed_dist, min_dist);
+    barrier();
+    if (z % 2 == 0) {
+        reduce_into(local_data[local_i], local_data[local_i + 1]);
+    }
+    barrier();
+    if (z % 4 == 0) {
+        reduce_into(local_data[local_i], local_data[local_i + 2]);
+    }
+    barrier();
+    if (z % 8 == 0) {
+        reduce_into(local_data[local_i], local_data[local_i + 4]);
+    }
+    barrier();
+    if (z % 16 == 0) {
+        reduce_into(local_data[local_i], local_data[local_i + 8]);
+    }
+
+    if (gl_GlobalInvocationID.z == 0) {
+        vec4 data = imageLoad(tex_out, ivec2(gl_GlobalInvocationID.xy));
+        reduce_into(data, local_data[local_i]);
+        min_dist = data.w;
+        imageStore(tex_out,
+            ivec2(gl_GlobalInvocationID.xy),
+            data);
+    }
+}
