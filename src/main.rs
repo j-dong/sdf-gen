@@ -899,7 +899,9 @@ unsafe fn main_unsafe(
         vk::PipelineStageFlags::empty()
         | vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT
         | vk::PipelineStageFlags::TOP_OF_PIPE,
-        vk::PipelineStageFlags::COMPUTE_SHADER,
+        vk::PipelineStageFlags::empty()
+        | vk::PipelineStageFlags::COMPUTE_SHADER
+        | vk::PipelineStageFlags::TRANSFER,
         vk::DependencyFlags::empty(),
         &[],
         &[],
@@ -924,7 +926,7 @@ unsafe fn main_unsafe(
                 .build(),
             vk::ImageMemoryBarrier::builder()
                 .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .old_layout(vk::ImageLayout::UNDEFINED)
                 .new_layout(vk::ImageLayout::GENERAL)
                 .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -959,6 +961,20 @@ unsafe fn main_unsafe(
             },
         ],
     );
+    device.cmd_pipeline_barrier(
+        cmd,
+        vk::PipelineStageFlags::TRANSFER,
+        vk::PipelineStageFlags::COMPUTE_SHADER,
+        vk::DependencyFlags::empty(),
+        &[
+            vk::MemoryBarrier::builder()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
+                .build(),
+        ],
+        &[],
+        &[],
+    );
 
     // dispatch compute to generate sdf
     device.cmd_bind_pipeline(
@@ -988,7 +1004,7 @@ unsafe fn main_unsafe(
                 &[
                     vk::MemoryBarrier::builder()
                         .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE)
                         .build(),
                 ],
                 &[],
