@@ -80,12 +80,6 @@ pub struct Mat2 {
 }
 
 impl Mat2 {
-    pub fn identity() -> Mat2 {
-        Mat2 {
-            rows: [Vec2 { x: 1.0, y: 0.0 }, Vec2 { x: 0.0, y: 1.0 }]
-        }
-    }
-
     pub fn rotate(theta: f64) -> Mat2 {
         Mat2 {
             rows: [

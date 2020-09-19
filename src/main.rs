@@ -70,7 +70,7 @@ struct Options {
     #[structopt(parse(from_os_str))]
     input: PathBuf,
     /// The output file name
-    #[structopt(parse(from_os_str))]
+    #[structopt(short, parse(from_os_str))]
     output: Option<PathBuf>,
     /// Output width
     #[structopt(short, long)]
@@ -87,6 +87,12 @@ struct Options {
     /// Origin Y position
     #[structopt(short = "y", long, default_value="0.0")]
     origin_y: f32,
+    /// SDF scale (larger = more spread out)
+    #[structopt(long, default_value="1.0")]
+    sdf_scale: f32,
+    /// Gradient scale (larger = steeper)
+    #[structopt(long, default_value="0.70710678118")]
+    grad_scale: f32,
 }
 
 #[derive(Default, Copy, Clone)]
@@ -1165,6 +1171,9 @@ fn main() {
     let mut out_normal = image::RgbaImage::new(opt.width, opt.height);
 
     // fix pixels close to edge
+    let xy_scale = opt.grad_scale.max(0.0).min(1.0);
+    let z_scale = (1.0 - xy_scale * xy_scale).max(0.0).sqrt();
+    let inv_sdf_scale = 1.0 / opt.sdf_scale;
     for y in 0..opt.height as usize {
         for x in 0..opt.width as usize {
             let i = y * opt.width as usize + x;
@@ -1201,12 +1210,11 @@ fn main() {
                 }
                 x.round() as u8
             }
-            use std::f32::consts::FRAC_1_SQRT_2;
             out_normal.put_pixel(x as u32, y as u32, image::Rgba([
-                normalize(0.5 * FRAC_1_SQRT_2 * grad_x + 0.5),
-                normalize(0.5 * FRAC_1_SQRT_2 * grad_y + 0.5),
-                normalize(0.5 * FRAC_1_SQRT_2 + 0.5),
-                saturate(signed_distance + 127.5),
+                normalize(0.5 * xy_scale * grad_x + 0.5),
+                normalize(0.5 * xy_scale * grad_y + 0.5),
+                normalize(0.5 * z_scale + 0.5),
+                saturate(inv_sdf_scale * signed_distance + 127.5),
             ]));
         }
     }
