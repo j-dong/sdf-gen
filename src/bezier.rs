@@ -360,7 +360,7 @@ impl Curve {
             .min(dist_to_line(self.c, self.from, p));
     }
 
-    pub fn ray_crossings(&self, o: Vec2, m: Mat2) -> i32 {
+    pub fn ray_crossings(&self, o: Vec2, m: Mat2, ignore_first: bool) -> i32 {
         let rot_p1 = m * (self.from - o);
         let rot_p2 = m * (self.c - o);
         let rot_p3 = m * (self.to - o);
@@ -400,12 +400,19 @@ impl Curve {
             )
         } else {
             (
-                0.5 * (-b + s) / a,
                 0.5 * (-b - s) / a,
+                0.5 * (-b + s) / a,
             )
         };
-        let x1 = v_a.x * t1 * t1 + v_b.x * t1 + v_c.x;
-        let x2 = v_a.x * t2 * t2 + v_b.x * t2 + v_c.x;
+        let mut x1 = v_a.x * t1 * t1 + v_b.x * t1 + v_c.x;
+        let mut x2 = v_a.x * t2 * t2 + v_b.x * t2 + v_c.x;
+        if ignore_first {
+            if x1.abs() < x2.abs() {
+                x1 = -1.0;
+            } else {
+                x2 = -1.0;
+            }
+        }
         let mut count = 0;
         if x1 > 0.0 && t1_count {
             count += 1;
@@ -630,7 +637,6 @@ impl QuadraticPath {
 
     // returns (normal, inside, distance)
     pub fn calculate_true_normal(&self, p: Vec2) -> (Vec2, bool, f64) {
-        // dbg!(p);
         use crate::FIX_THRESHOLD;
         // first, find the curve it lies on
         let mut best_dist2 = std::f64::INFINITY;
@@ -640,7 +646,7 @@ impl QuadraticPath {
         for (i, l) in self.loops.iter().enumerate() {
             for (j, curve) in l.segments.iter().enumerate() {
                 let min_dist = curve.hull_distance(p);
-                if min_dist > FIX_THRESHOLD as f64 {
+                if min_dist > 2.0 * FIX_THRESHOLD as f64 {
                     continue;
                 }
                 // compute cubic coefficients
@@ -668,43 +674,29 @@ impl QuadraticPath {
                 }
             }
         }
-        // let curve_index = curve_index.expect("no curve close to point");
+        // to choose the correct normal, fire a ray starting from
+        // p + epsilon * normal
+        let curve_index = curve_index.expect("no curve close to point");
         let numerical_normal = p - curve_point;
         normal = 1.0 / normal.norm() * normal;
         if normal.dot(numerical_normal) < 0.0 {
             normal = -1.0 * normal;
         }
         let transform = Mat2::from_cols(normal, normal.perp()).transpose();
-        let transform = Mat2::identity();
-        // let p = p + 0.25 * normal;
-        // dbg!(curve_index);
-        // let the_curve = self.loops[curve_index.0].segments[curve_index.1];
-        // dbg!(the_curve);
         // calculate winding number
         let mut winding_number: i32 = 0;
         for (i, l) in self.loops.iter().enumerate() {
             for (j, c) in l.segments.iter().enumerate() {
-                // if (i, j) == curve_index {
-                //     continue;
-                // }
-                let num_crossings = c.ray_crossings(p, transform);
-                // let num_crossings = c.ray_crossings(p, Mat2::identity());
-                // if num_crossings != 0 {
-                //     dbg!(c);
-                //     dbg!((i, j));
-                //     dbg!(num_crossings);
-                // }
+                // to avoid floating-point errors, ignore the original curve
+                // note: since normal points in the same direction
+                // as numerical_normal, it never lies on the ray
+                let ignore = (i, j) == curve_index;
+                let num_crossings = c.ray_crossings(p, transform, ignore);
                 winding_number += num_crossings;
             }
-            break;
         }
+        // if normal points inside, flip it
         let inside = winding_number != 0;
-        // let flip = inside ^ (normal.x >= 0.0);
-        // if flip {
-        //     (-1.0 * normal, true, best_dist2.sqrt())
-        // } else {
-        //     (normal, false, best_dist2.sqrt())
-        // }
         if inside {
             (-1.0 * normal, true, best_dist2.sqrt())
         } else {

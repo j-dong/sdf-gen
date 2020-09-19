@@ -17,8 +17,7 @@ const WORKGROUP_X: u32 = 8;
 const WORKGROUP_Y: u32 = 8;
 const WORKGROUP_Z: u32 = 16;
 
-// pub const FIX_THRESHOLD: f32 = 0.001;
-pub const FIX_THRESHOLD: f32 = 10.0;
+pub const FIX_THRESHOLD: f32 = 0.01;
 
 mod bezier;
 use bezier::*;
@@ -82,6 +81,12 @@ struct Options {
     /// Scale factor
     #[structopt(short, long, default_value="1.0")]
     scale: f32,
+    /// Origin X position
+    #[structopt(short = "x", long, default_value="0.0")]
+    origin_x: f32,
+    /// Origin Y position
+    #[structopt(short = "y", long, default_value="0.0")]
+    origin_y: f32,
 }
 
 #[derive(Default, Copy, Clone)]
@@ -1102,7 +1107,11 @@ fn main() {
 
     fn translate(vx: Vec2, u: f32, v: f32, opt: &Options) -> FillVertex {
         FillVertex {
-            pos_params: [vx.x as f32 * opt.scale, vx.y as f32 * opt.scale, u, v],
+            pos_params: [
+                vx.x as f32 * opt.scale + opt.origin_x,
+                vx.y as f32 * opt.scale + opt.origin_y,
+                u,
+                v],
         }
     }
 
@@ -1123,14 +1132,14 @@ fn main() {
         for seg in &l.segments {
             curves.push(SdfCurve {
                 from_to: [
-                    seg.from.x as f32 * opt.scale,
-                    seg.from.y as f32 * opt.scale,
-                    seg.to.x as f32 * opt.scale,
-                    seg.to.y as f32 * opt.scale,
+                    seg.from.x as f32 * opt.scale + opt.origin_x,
+                    seg.from.y as f32 * opt.scale + opt.origin_y,
+                    seg.to.x as f32 * opt.scale + opt.origin_x,
+                    seg.to.y as f32 * opt.scale + opt.origin_y,
                 ],
                 control: [
-                    seg.c.x as f32 * opt.scale,
-                    seg.c.y as f32 * opt.scale,
+                    seg.c.x as f32 * opt.scale + opt.origin_x,
+                    seg.c.y as f32 * opt.scale + opt.origin_y,
                     1.0,
                     1.0,
                 ],
@@ -1160,19 +1169,15 @@ fn main() {
         for x in 0..opt.width as usize {
             let i = y * opt.width as usize + x;
             let pix = &mut results.sdf_data[i];
-            // if pix[3].abs() < FIX_THRESHOLD {
-            if true {
+            if pix[3].abs() < FIX_THRESHOLD {
                 let p = 1.0 / opt.scale as f64 * Vec2 {
-                    x: x as f64 + 0.5,
-                    y: y as f64 + 0.5,
+                    x: x as f64 + 0.5 - opt.origin_x as f64,
+                    y: y as f64 + 0.5 - opt.origin_y as f64,
                 };
                 let (normal, inside, dist) = path.calculate_true_normal(p);
                 pix[0] = normal.x as f32;
                 pix[1] = normal.y as f32;
                 pix[2] = opt.scale * if inside { -dist } else { dist } as f32;
-                if dist <= 1e-12 { // TODO: XXX
-                    pix[2] = if inside { -1.0 } else { 1.0 };
-                }
                 pix[3] = opt.scale * dist as f32;
             }
             let grad_x = pix[0];
@@ -1202,13 +1207,6 @@ fn main() {
                 normalize(0.5 * FRAC_1_SQRT_2 * grad_y + 0.5),
                 normalize(0.5 * FRAC_1_SQRT_2 + 0.5),
                 saturate(signed_distance + 127.5),
-                // 255,
-            ]));
-            out_normal.put_pixel(x as u32, y as u32, image::Rgba([
-                if pix[2] < 0.0 { 0 } else { 255 },
-                if pix[2] < 0.0 { 0 } else { 255 },
-                if pix[2] < 0.0 { 0 } else { 255 },
-                255,
             ]));
         }
     }
