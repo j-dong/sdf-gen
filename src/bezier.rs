@@ -56,8 +56,9 @@ impl Vec2 {
     pub fn angle_to(self, other: Self) -> f64 {
         let v1 = self.normalized();
         let v2 = other.normalized();
-        return 2.0 * (v1 - v2).norm().atan2(
-                     (v1 + v2).norm());
+        let sign = if v1.x * v2.y < v1.y * v2.x { -1.0 } else { 1.0 };
+        sign * 2.0 * (v1 - v2).norm().atan2(
+                     (v1 + v2).norm())
     }
 }
 
@@ -203,8 +204,8 @@ impl Ellipse {
         let y12 = p1_prime.y * p1_prime.y;
         let x12 = p1_prime.x * p1_prime.x;
         let denom = rx2 * y12 + ry2 * x12;
-        let c_prime = (if large_arc == sweep { 1.0 } else { -1.0 }) *
-            ((rx2 * ry2 - denom) / denom).sqrt() *
+        let c_prime = (if large_arc == sweep { -1.0 } else { 1.0 }) *
+            ((rx2 * ry2 - denom) / denom).max(0.0).sqrt() *
             Vec2 {
                 x: rx * p1_prime.y / ry,
                 y: -ry * p1_prime.x / rx,
@@ -293,7 +294,7 @@ impl Ellipse {
     }
 
     fn derivative_at(&self, theta: f64) -> Vec2 {
-        self.c + Vec2 { x: -self.rx * theta.sin(), y: self.ry * theta.cos() }.rotate(self.phi)
+        Vec2 { x: -self.rx * theta.sin(), y: self.ry * theta.cos() }.rotate(self.phi)
     }
 
     fn to_quadratic_approx(&self, arc: Arc) -> Curve {
@@ -622,6 +623,9 @@ impl QuadraticPath {
                         continue;
                     }
                     curloop.push_arc(cur, to, rx, ry, x_axis_rotation.to_radians(), large_arc, sweep);
+                    cur = to;
+                    last_quad = cur;
+                    last_cubic = cur;
                 }
             }
         }
